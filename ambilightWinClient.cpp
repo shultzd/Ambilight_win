@@ -1,4 +1,4 @@
-// ambilightServer.cpp : Defines the entry point for the console application.
+// ambilightWinClient.cpp : Defines the entry point for the console application.
 //
 
 #include "stdafx.h"
@@ -8,50 +8,77 @@
 ///////////////////////////////////////////////////////////////////////////////////
 // Defines
 ///////////////////////////////////////////////////////////////////////////////////
+
+#define SERIAL_COM_PORT L"\\\\.\\COM1"
+
 #define NUM_VALUES_PER_WIN_PIXEL   (4)
 #define NUM_VALUES_PER_STRIP_PIXEL (3)
 
-///////////////////////////////////////////////////////////////////////////////////
-// Parameters
-///////////////////////////////////////////////////////////////////////////////////
-
-//COM port
-#define SERIAL_COM_PORT L"\\\\.\\COM1"
-
-//General config
-#define BRIGHTNESS_COEF                  (1.0)
-#define SCREEN_EDGE_DETECT_INTERVAL_SEC  (10)   //Time interval between screen edge detection
-#define EDGE_DETECT_SENSITIVITY          (0.05) // Edge detection sensitivity 0-1 (0% - 100%)
-#define EDGE_DETECT_STABILITY            TRUE   // do the 2 stage edge detection?
-
-//Resolution of LEDs
-#define LEDS_WIDTH  (30)
-#define LEDS_HEIGHT (15)
-
-#define LEDS_TOTAL_AMOUNT ((LEDS_WIDTH + LEDS_HEIGHT) * 2) // Amount of LEDs on all 4 sides
+#define LEDS_TOTAL_AMOUNT ((gConfig.leds.numHorisontal + gConfig.leds.numVertical) * 2) // Amount of LEDs on all 4 sides
 #define TOTAL_NUMBER_OF_BYTES_TO_SEND (LEDS_TOTAL_AMOUNT * NUM_VALUES_PER_STRIP_PIXEL)
+
+///////////////////////////////////////////////////////////////////////////////////
+// Configurations
+///////////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+   unsigned int top;
+   unsigned int bottom;
+}screenEdges_t;
+
+struct {
+   float brightnessCoef;
+
+   struct {
+      bool enable;                   // Enable edge detection
+      unsigned int checkIntervalSec; // Time interval between screen edge detection
+      double sensitivity;            // Edge detection sensitivity 0-1 (0% - 100%)
+      bool stabilityEnable;          // do the 2 stage edge detection?
+   } edgeDetection;
+   
+   struct {
+      unsigned int numHorisontal;
+      unsigned int numVertical;
+   } leds;
+
+   HANDLE hSerial;
+} gConfig = {0};
 
 ///////////////////////////////////////////////////////////////////////////////////
 // Globals
 ///////////////////////////////////////////////////////////////////////////////////
 
+// Flow control 
 BOOL stopCapturing = 0;
 
-int gSuggestedTopEdge = MAXINT32;
-int gSuggestedBottomEdge = MAXINT32;
+// Screen edges
+screenEdges_t gCurEdges = {MAXINT32, MAXINT32};
+screenEdges_t gSuggestedEdges = {MAXINT32, MAXINT32};
 
-int gTopEdge = MAXINT32;
-int gBottomEdge = MAXINT32;
+void initConfig()
+{
+   gConfig.brightnessCoef = 1.0;
 
-BOOL setupSerialComm(_In_ LPCWSTR portName, _Out_ HANDLE &hSerial)
+   gConfig.edgeDetection.enable                = TRUE;
+   gConfig.edgeDetection.checkIntervalSec      = 5;
+   gConfig.edgeDetection.sensitivity           = 0.0/*0.05*/;
+   gConfig.edgeDetection.stabilityEnable       = TRUE;
+   
+   gConfig.leds.numHorisontal = 28;
+   gConfig.leds.numVertical   = 16;
+
+   gConfig.hSerial = INVALID_HANDLE_VALUE;
+}
+
+BOOL setupSerialComm()
 {
    DCB dcbSerialParams = { 0 };
    COMMTIMEOUTS timeouts = { 0 };
 
    // Open the highest available serial port number
    printf("Opening serial port...");
-   hSerial = CreateFile(portName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-   if (hSerial == INVALID_HANDLE_VALUE)
+   gConfig.hSerial = CreateFile(SERIAL_COM_PORT, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (gConfig.hSerial == INVALID_HANDLE_VALUE)
    {
       printf("Error\n");
       return FALSE;
@@ -61,10 +88,10 @@ BOOL setupSerialComm(_In_ LPCWSTR portName, _Out_ HANDLE &hSerial)
    // Set device parameters (115200 baud, 1 start bit,
    // 1 stop bit, no parity)
    dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
-   if (GetCommState(hSerial, &dcbSerialParams) == 0)
+   if (GetCommState(gConfig.hSerial, &dcbSerialParams) == 0)
    {
       printf("Error getting device state\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
@@ -72,10 +99,10 @@ BOOL setupSerialComm(_In_ LPCWSTR portName, _Out_ HANDLE &hSerial)
    dcbSerialParams.ByteSize = 8;
    dcbSerialParams.StopBits = ONESTOPBIT;
    dcbSerialParams.Parity = NOPARITY;
-   if (SetCommState(hSerial, &dcbSerialParams) == 0)
+   if (SetCommState(gConfig.hSerial, &dcbSerialParams) == 0)
    {
       printf("Error setting device parameters\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
@@ -85,10 +112,10 @@ BOOL setupSerialComm(_In_ LPCWSTR portName, _Out_ HANDLE &hSerial)
    timeouts.ReadTotalTimeoutMultiplier = 10;
    timeouts.WriteTotalTimeoutConstant = 50;
    timeouts.WriteTotalTimeoutMultiplier = 10;
-   if (SetCommTimeouts(hSerial, &timeouts) == 0)
+   if (SetCommTimeouts(gConfig.hSerial, &timeouts) == 0)
    {
       printf("Error setting timeouts\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
@@ -96,7 +123,7 @@ BOOL setupSerialComm(_In_ LPCWSTR portName, _Out_ HANDLE &hSerial)
    return TRUE;
 }
 
-BOOL sendToArduino(HANDLE &hSerial, BYTE *finalPixels, int numPixels)
+BOOL sendToArduino(BYTE *finalPixels, int numPixels)
 {
    const BYTE preamble[5] = { 'd', 'a', 'n', 'n', 'y' };
    const BYTE ackValue = 'k';
@@ -106,18 +133,18 @@ BOOL sendToArduino(HANDLE &hSerial, BYTE *finalPixels, int numPixels)
 
    // Send preamble
    DWORD bytes_written;
-   if (!WriteFile(hSerial, preamble, preambleSize, &bytes_written, NULL))
+   if (!WriteFile(gConfig.hSerial, preamble, preambleSize, &bytes_written, NULL))
    {
       printf("Error!!! sendToArduino:WriteFile 1 failed\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
    // Send specified text (remaining command line arguments)
-   if (!WriteFile(hSerial, finalPixels, numPixels, &bytes_written, NULL))
+   if (!WriteFile(gConfig.hSerial, finalPixels, numPixels, &bytes_written, NULL))
    {
       printf("Error!!! sendToArduino:WriteFile 2 failed\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
@@ -126,10 +153,10 @@ BOOL sendToArduino(HANDLE &hSerial, BYTE *finalPixels, int numPixels)
    DWORD bytes_read = 0;
    do
    {
-      if (!ReadFile(hSerial, &ackByte, ackSize, &bytes_read, NULL))
+      if (!ReadFile(gConfig.hSerial, &ackByte, ackSize, &bytes_read, NULL))
       {
          printf("Error!!! sendToArduino:ReadFile failed\n");
-         CloseHandle(hSerial);
+         CloseHandle(gConfig.hSerial);
          return FALSE;
       }
    } while (bytes_read == 0);
@@ -137,17 +164,17 @@ BOOL sendToArduino(HANDLE &hSerial, BYTE *finalPixels, int numPixels)
    if (ackByte != ackValue)
    {
       printf("Error!!! sendToArduino:ReadFile failed !! wrong ACK byte received...\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
    return TRUE;
 }
 
-void setSolidColor(HANDLE &hSerial, const BYTE red, const BYTE green, const BYTE blue)
+void setSolidColor(const BYTE red, const BYTE green, const BYTE blue)
 {
-   BYTE finalPixals[TOTAL_NUMBER_OF_BYTES_TO_SEND] = { 0 };
-   int i = 0;
+   BYTE* finalPixals = new BYTE[TOTAL_NUMBER_OF_BYTES_TO_SEND];
+   unsigned int i = 0;
 
    for (i = 0; i < TOTAL_NUMBER_OF_BYTES_TO_SEND; i += NUM_VALUES_PER_STRIP_PIXEL)
    {
@@ -156,12 +183,20 @@ void setSolidColor(HANDLE &hSerial, const BYTE red, const BYTE green, const BYTE
       finalPixals[i + 2] = blue;
    }
 
-   sendToArduino(hSerial, finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND);
+   sendToArduino(finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND);
+
+   delete[] finalPixals;
 }
 
-inline void clearLeds(HANDLE &hSerial)
+inline void clearLeds()
 {
-   setSolidColor(hSerial, 0, 0, 0);
+   setSolidColor(0, 0, 0);
+}
+
+void setDefaultScreenEdges()
+{
+   gCurEdges.top = 0;
+   gCurEdges.bottom = GetSystemMetrics(SM_CYSCREEN) - 1;
 }
 
 void detectScreenEdges()
@@ -169,14 +204,13 @@ void detectScreenEdges()
    int width = GetSystemMetrics(SM_CXSCREEN);
    int height = GetSystemMetrics(SM_CYSCREEN);
 
-   int newTopEdge = gTopEdge;
-   int newBottomEdge = gBottomEdge;
+   int newTopEdge = gCurEdges.top;
+   int newBottomEdge = gCurEdges.bottom;
 
-   if ((gTopEdge == MAXINT32) || (gBottomEdge == MAXINT32))
+   if ((gCurEdges.top == MAXINT32) || (gCurEdges.bottom == MAXINT32))
    {
       printf("Initial screen edge detection, setting default values\n");
-      gTopEdge = 0;
-      gBottomEdge = height - 1;
+      setDefaultScreenEdges();
    }
 
    // copy screen to bitmap
@@ -239,10 +273,10 @@ void detectScreenEdges()
       }
       
       precession = (double)sum / valCount / MAXBYTE;
-      if (precession > EDGE_DETECT_SENSITIVITY)
+      if (precession > gConfig.edgeDetection.sensitivity)
       {
          newTopEdge = y;
-         //if (gTopEdge != newTopEdge) printf("Detected new top edge - %d, precession - %f\n", newTopEdge, precession);
+         //if (gCurEdges.top != newTopEdge) printf("Detected new top edge - %d, precession - %f\n", newTopEdge, precession);
          
          break;
       }
@@ -262,10 +296,10 @@ void detectScreenEdges()
       }
 
       precession = (double)sum / valCount / MAXBYTE;
-      if (precession > EDGE_DETECT_SENSITIVITY)
+      if (precession > gConfig.edgeDetection.sensitivity)
       {
          newBottomEdge = height - y - 1;
-         //if (gBottomEdge != newBottomEdge) printf("Detected new bottom edge - %d, precession - %f\n", newBottomEdge, precession);
+         //if (gCurEdges.bottom != newBottomEdge) printf("Detected new bottom edge - %d, precession - %f\n", newBottomEdge, precession);
 
          break;
       }
@@ -283,25 +317,25 @@ void detectScreenEdges()
       return;
    }
 
-   if ((newTopEdge != gTopEdge) || (newBottomEdge != gBottomEdge))
+   if ((newTopEdge != gCurEdges.top) || (newBottomEdge != gCurEdges.bottom))
    {
-      if ((!EDGE_DETECT_STABILITY) || ((newTopEdge == gSuggestedTopEdge) && (newBottomEdge == gSuggestedBottomEdge)))
+      if ((!gConfig.edgeDetection.stabilityEnable) || ((newTopEdge == gSuggestedEdges.top) && (newBottomEdge == gSuggestedEdges.bottom)))
       {
          //printf("Setting new screen edges\n");
-         gTopEdge = newTopEdge;
-         gBottomEdge = newBottomEdge;
+         gCurEdges.top = newTopEdge;
+         gCurEdges.bottom = newBottomEdge;
       }
       else
       {
          //printf("Suggesting new screen edges\n");
-         gSuggestedTopEdge = newTopEdge;
-         gSuggestedBottomEdge = newBottomEdge;
+         gSuggestedEdges.top = newTopEdge;
+         gSuggestedEdges.bottom = newBottomEdge;
       }
    }
 }
 
 // Translate windows pixel format (BGRA) to WS2812b format (RGB)
-inline void translateWin2LedPixel(_In_ const BYTE* winPixel, _Out_ BYTE* ledPixel)
+inline void translateWin2LedPixel(const BYTE* winPixel, BYTE* ledPixel, const float brightnessNormalizationCoef)
 {
    int red, green, blue;
 
@@ -310,15 +344,16 @@ inline void translateWin2LedPixel(_In_ const BYTE* winPixel, _Out_ BYTE* ledPixe
    green = *(winPixel + 1);
    blue  = *(winPixel + 0);
 
-   *(ledPixel + 0) = (BYTE)(red   * BRIGHTNESS_COEF);
-   *(ledPixel + 1) = (BYTE)(green * BRIGHTNESS_COEF);
-   *(ledPixel + 2) = (BYTE)(blue  * BRIGHTNESS_COEF);
+   *(ledPixel + 0) = (BYTE)(red   * gConfig.brightnessCoef * brightnessNormalizationCoef);
+   *(ledPixel + 1) = (BYTE)(green * gConfig.brightnessCoef * brightnessNormalizationCoef);
+   *(ledPixel + 2) = (BYTE)(blue  * gConfig.brightnessCoef * brightnessNormalizationCoef);
 }
 
-void prepareLedColors(_Out_ BYTE *finalPixals, _In_ BYTE* lpPixels, BITMAPINFO *MyBMInfo)
+void prepareLedColors(BYTE *finalPixals, const BYTE* lpPixels, const BITMAPINFO *MyBMInfo)
 {
-   int x, y, x_add;
+   int x, y, x_add; // Note: x,y must be signed, some loops are depended on it
    int pixel, finalPixel;
+   float brightnessNormalizationCoef;
 
    int stride = MyBMInfo->bmiHeader.biWidth;
    finalPixel = 0;
@@ -326,61 +361,87 @@ void prepareLedColors(_Out_ BYTE *finalPixals, _In_ BYTE* lpPixels, BITMAPINFO *
    //Bottom side
    x = 0; y = 0;
    x_add = y * stride;
-   for (x = 0; x < LEDS_WIDTH; x++)
+   for (x = 0; x < (int)gConfig.leds.numHorisontal; x++)
    {
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
-      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel]);
+      
+      // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
+      if ((x == 0) || (x == gConfig.leds.numHorisontal - 1))
+         brightnessNormalizationCoef = 0.5;
+      else
+         brightnessNormalizationCoef = 1;
+
+      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
       
       finalPixel += NUM_VALUES_PER_STRIP_PIXEL;
    }
 
    //Right side
-   x = LEDS_WIDTH - 1;
-   for (y = 0; y < LEDS_HEIGHT; y++)
+   x = gConfig.leds.numHorisontal - 1;
+   for (y = 0; y < (int)gConfig.leds.numVertical; y++)
    {
       x_add = y * stride;
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
 
-      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel]);
+      // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
+      if ((y == 0) || (y == (gConfig.leds.numVertical - 1)))
+         brightnessNormalizationCoef = 0.5;
+      else
+         brightnessNormalizationCoef = 1;
+
+      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
       finalPixel += NUM_VALUES_PER_STRIP_PIXEL;
    }
 
    //Top side
-   y = LEDS_HEIGHT - 1;
+   y = gConfig.leds.numVertical - 1;
    x_add = y * stride;
-   for (x = LEDS_WIDTH - 1; x >= 0; x--)
+   for (x = gConfig.leds.numHorisontal - 1; x >= 0; x--)
    {
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
-      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel]);
+
+      // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
+      if ((x == 0) || (x == gConfig.leds.numHorisontal - 1))
+         brightnessNormalizationCoef = 0.5;
+      else
+         brightnessNormalizationCoef = 1;
+
+      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
       finalPixel += NUM_VALUES_PER_STRIP_PIXEL;
    }
 
    //Left side
    x = 0;
-   for (y = LEDS_HEIGHT - 1; y >= 0; y--)
+   for (y = gConfig.leds.numVertical - 1; y >= 0; y--)
    {
       x_add = y * stride;
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
-      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel]);
+
+      // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
+      if ((y == 0) || (y == (gConfig.leds.numVertical - 1)))
+         brightnessNormalizationCoef = 0.5;
+      else
+         brightnessNormalizationCoef = 1;
+
+      translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
       finalPixel += NUM_VALUES_PER_STRIP_PIXEL;
    }
-
 }
 
-void captureLoop(HANDLE &hSerial)
+void captureLoop()
 {
-   int width = GetSystemMetrics(SM_CXSCREEN);
-   int height = GetSystemMetrics(SM_CYSCREEN);
+   unsigned int width = GetSystemMetrics(SM_CXSCREEN);
+   unsigned int height = GetSystemMetrics(SM_CYSCREEN);
 
    printf("screen is %dx%d\n", width, height);
 
    // copy screen to bitmap
    HDC     hScreen = GetDC(NULL);
    HDC     hDC = CreateCompatibleDC(hScreen);
-   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, LEDS_WIDTH, LEDS_HEIGHT);
+   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, gConfig.leds.numHorisontal, gConfig.leds.numVertical);
 
    SelectObject(hDC, hBitmap);
 
@@ -402,11 +463,11 @@ void captureLoop(HANDLE &hSerial)
 
    // create the pixel buffer
    BYTE* lpPixels = new BYTE[MyBMInfo.bmiHeader.biSizeImage];
-   BYTE finalPixals[TOTAL_NUMBER_OF_BYTES_TO_SEND];
+   BYTE* finalPixals = new BYTE[TOTAL_NUMBER_OF_BYTES_TO_SEND];
 
    while (!stopCapturing)
    {
-      if ((gTopEdge >= height) || (gBottomEdge >= height) || (gTopEdge >= gBottomEdge))
+      if ((gCurEdges.top >= height) || (gCurEdges.bottom >= height) || (gCurEdges.top >= gCurEdges.bottom))
       {
          printf("Error!!! wrong edges...\n");
          stopCapturing = TRUE;
@@ -414,7 +475,7 @@ void captureLoop(HANDLE &hSerial)
       }
 
       SetStretchBltMode(hDC, HALFTONE);
-      BOOL bRet = StretchBlt(hDC, 0, 0, MyBMInfo.bmiHeader.biWidth, MyBMInfo.bmiHeader.biHeight, hScreen, 0, gTopEdge, width, (gBottomEdge - gTopEdge + 1), SRCCOPY);
+      BOOL bRet = StretchBlt(hDC, 0, 0, MyBMInfo.bmiHeader.biWidth, MyBMInfo.bmiHeader.biHeight, hScreen, 0, gCurEdges.top, width, (gCurEdges.bottom - gCurEdges.top + 1), SRCCOPY);
       if (!bRet)
       {
          printf("Error!!! StretchBlt failed\n");
@@ -443,7 +504,7 @@ void captureLoop(HANDLE &hSerial)
       // prepare all LED colors
       prepareLedColors(finalPixals, lpPixels, &MyBMInfo);
      
-      if (!sendToArduino(hSerial, finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND))
+      if (!sendToArduino(finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND))
       {
          printf("Error!!! sendToArduino failed\n");
          printf("Sending data to serial port failed!\n");
@@ -458,27 +519,35 @@ void captureLoop(HANDLE &hSerial)
 
    // clean up
    delete[] lpPixels;
+   delete[] finalPixals;
    DeleteObject(hBitmap);
    DeleteDC(hDC);
    ReleaseDC(NULL, hScreen);
 
-   clearLeds(hSerial);
+   clearLeds();
 }
 
 DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
 {
    const int SEC = 1000; // 1 second
 
-   printf("Screen edge detection thread started - detection interval is %d [Sec]\n", SCREEN_EDGE_DETECT_INTERVAL_SEC);
+   printf("Screen edge detection thread started - detection interval is %d [Sec]\n", gConfig.edgeDetection.checkIntervalSec);
 
    for (;;)
    {
       if (!stopCapturing)
       {
-         detectScreenEdges();
+         if (gConfig.edgeDetection.enable)
+         {
+            detectScreenEdges();
+         }
+         else
+         {
+            setDefaultScreenEdges();
+         }
       }
 
-      Sleep(SCREEN_EDGE_DETECT_INTERVAL_SEC * SEC);
+      Sleep(gConfig.edgeDetection.checkIntervalSec * SEC);
    }
 
    return 0;
@@ -506,19 +575,18 @@ void StartDetectScreenEdgesThread()
 
 DWORD WINAPI captureThread(LPVOID lpParam)
 {
-   HANDLE *hSerial = (HANDLE*)lpParam;
-   captureLoop(*hSerial);
+   captureLoop();
    return 0;
 }
 
-void StartCaptureThread(HANDLE &hSerial)
+void StartCaptureThread()
 {
    DWORD dwThreadId;
    HANDLE hThread = CreateThread(
       NULL,                      // default security attributes
       0,                         // use default stack size
       captureThread,             // thread function
-      &hSerial,                  // argument to thread function
+      NULL,                      // argument to thread function
       0,                         // use default creation flags
       &dwThreadId);              // returns the thread identifier
 
@@ -539,30 +607,33 @@ BOOL CtrlHandler(DWORD fdwCtrlType)
 
 int main(int argc, char* argv[])
 {
-   HANDLE hSerial;
-   
    if (!SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE))
    {
       printf("ERROR: could not set control handler.\n");
       return -1;
    }
    
-   detectScreenEdges(); //Do the detection for the first time
+   initConfig();
+
+   setDefaultScreenEdges();
    
-   if (!setupSerialComm(SERIAL_COM_PORT, hSerial))
+   if (!setupSerialComm())
    {
       printf("Error connecting to COM port\n");
-      CloseHandle(hSerial);
+      CloseHandle(gConfig.hSerial);
       return -1;
    }
-
-   clearLeds(hSerial);
+   
+   // Just to verify all leds are working
+   setSolidColor(255, 0, 0);
+   Sleep(5000);
+   clearLeds();
 
    printf("starting the edge detection thread\n");
    StartDetectScreenEdgesThread();
    
    printf("starting the capturing loop thread\n");
-   StartCaptureThread(hSerial);
+   StartCaptureThread();
 
    // Program termination
    getchar();
@@ -572,7 +643,7 @@ int main(int argc, char* argv[])
 
    // Close serial port
    printf("Closing serial port...");
-   if (CloseHandle(hSerial) == 0)
+   if (CloseHandle(gConfig.hSerial) == 0)
    {
       printf("Error\n");
       return -1;
@@ -582,5 +653,3 @@ int main(int argc, char* argv[])
 
    return 0;
 }
-
-
