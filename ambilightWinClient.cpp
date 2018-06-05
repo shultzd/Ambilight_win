@@ -1,15 +1,19 @@
-// ambilightWinClient.cpp : Defines the entry point for the console application.
+// ambilightServer.cpp : Defines the entry point for the console application.
 //
 
 #include "stdafx.h"
 #include <stdlib.h>
 #include <windows.h>
+#include <chrono> //For time measurements
 
 ///////////////////////////////////////////////////////////////////////////////////
 // Defines
 ///////////////////////////////////////////////////////////////////////////////////
 
 #define SERIAL_COM_PORT L"\\\\.\\COM1"
+
+#define MSEC_TO_SEC (1000) // 1 mSec = 1000 uSec
+#define USEC_TO_MSEC (1000) // 1 mSec = 1000 uSec
 
 #define NUM_VALUES_PER_WIN_PIXEL   (4)
 #define NUM_VALUES_PER_STRIP_PIXEL (3)
@@ -49,7 +53,8 @@ struct {
 ///////////////////////////////////////////////////////////////////////////////////
 
 // Flow control 
-BOOL stopCapturing = 0;
+BOOL gIsSerialConnected = FALSE;
+BOOL gExitProgram = FALSE;
 
 // Screen edges
 screenEdges_t gCurEdges = {MAXINT32, MAXINT32};
@@ -61,7 +66,7 @@ void initConfig()
 
    gConfig.edgeDetection.enable                = TRUE;
    gConfig.edgeDetection.checkIntervalSec      = 5;
-   gConfig.edgeDetection.sensitivity           = 0.0/*0.05*/;
+   gConfig.edgeDetection.sensitivity           = 0.01;
    gConfig.edgeDetection.stabilityEnable       = TRUE;
    
    gConfig.leds.numHorisontal = 28;
@@ -76,21 +81,24 @@ BOOL setupSerialComm()
    COMMTIMEOUTS timeouts = { 0 };
 
    // Open the highest available serial port number
-   printf("Opening serial port...");
+   //printf("Opening serial port...");
    gConfig.hSerial = CreateFile(SERIAL_COM_PORT, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
    if (gConfig.hSerial == INVALID_HANDLE_VALUE)
    {
-      printf("Error\n");
+      //printf("Error\n");
       return FALSE;
    }
-   else printf("OK\n");
+   else
+   {
+      //printf("OK\n");
+   }
 
    // Set device parameters (115200 baud, 1 start bit,
    // 1 stop bit, no parity)
    dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
    if (GetCommState(gConfig.hSerial, &dcbSerialParams) == 0)
    {
-      printf("Error getting device state\n");
+      //printf("Error getting device state\n");
       CloseHandle(gConfig.hSerial);
       return FALSE;
    }
@@ -101,7 +109,7 @@ BOOL setupSerialComm()
    dcbSerialParams.Parity = NOPARITY;
    if (SetCommState(gConfig.hSerial, &dcbSerialParams) == 0)
    {
-      printf("Error setting device parameters\n");
+      //printf("Error setting device parameters\n");
       CloseHandle(gConfig.hSerial);
       return FALSE;
    }
@@ -114,12 +122,12 @@ BOOL setupSerialComm()
    timeouts.WriteTotalTimeoutMultiplier = 10;
    if (SetCommTimeouts(gConfig.hSerial, &timeouts) == 0)
    {
-      printf("Error setting timeouts\n");
+      //printf("Error setting timeouts\n");
       CloseHandle(gConfig.hSerial);
       return FALSE;
    }
 
-   printf("Serial port initialization passed.\n");
+   //printf("Serial port initialization passed.\n");
    return TRUE;
 }
 
@@ -135,44 +143,60 @@ BOOL sendToArduino(BYTE *finalPixels, int numPixels)
    DWORD bytes_written;
    if (!WriteFile(gConfig.hSerial, preamble, preambleSize, &bytes_written, NULL))
    {
-      printf("Error!!! sendToArduino:WriteFile 1 failed\n");
+      //printf("Error!!! sendToArduino:WriteFile failed\n");
       CloseHandle(gConfig.hSerial);
+      gIsSerialConnected = FALSE;
       return FALSE;
    }
 
    // Send specified text (remaining command line arguments)
    if (!WriteFile(gConfig.hSerial, finalPixels, numPixels, &bytes_written, NULL))
    {
-      printf("Error!!! sendToArduino:WriteFile 2 failed\n");
+      //printf("Error!!! sendToArduino:WriteFile failed\n");
       CloseHandle(gConfig.hSerial);
+      gIsSerialConnected = FALSE;
       return FALSE;
    }
 
    //Wait for a response
    BYTE ackByte = 0;
    DWORD bytes_read = 0;
+   auto start_time = std::chrono::high_resolution_clock::now();
    do
    {
       if (!ReadFile(gConfig.hSerial, &ackByte, ackSize, &bytes_read, NULL))
       {
-         printf("Error!!! sendToArduino:ReadFile failed\n");
+         //printf("Error!!! sendToArduino:ReadFile failed\n");
          CloseHandle(gConfig.hSerial);
+         gIsSerialConnected = FALSE;
+         return FALSE;
+      }
+
+      auto end_time = std::chrono::high_resolution_clock::now();
+      auto time = end_time - start_time;
+      if ((std::chrono::duration_cast<std::chrono::microseconds>(time).count()) > (0.5 * USEC_TO_MSEC * MSEC_TO_SEC))
+      {
+         //printf("Error!!! sendToArduino: ACK timeout\n");
+         CloseHandle(gConfig.hSerial);
+         gIsSerialConnected = FALSE;
          return FALSE;
       }
    } while (bytes_read == 0);
 
    if (ackByte != ackValue)
    {
-      printf("Error!!! sendToArduino:ReadFile failed !! wrong ACK byte received...\n");
+      //printf("Error!!! sendToArduino:ReadFile failed !! wrong ACK byte received...\n");
       CloseHandle(gConfig.hSerial);
+      gIsSerialConnected = FALSE;
       return FALSE;
    }
 
    return TRUE;
 }
 
-void setSolidColor(const BYTE red, const BYTE green, const BYTE blue)
+BOOL setSolidColor(const BYTE red, const BYTE green, const BYTE blue)
 {
+   BOOL retVal;
    BYTE* finalPixals = new BYTE[TOTAL_NUMBER_OF_BYTES_TO_SEND];
    unsigned int i = 0;
 
@@ -183,14 +207,15 @@ void setSolidColor(const BYTE red, const BYTE green, const BYTE blue)
       finalPixals[i + 2] = blue;
    }
 
-   sendToArduino(finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND);
+   retVal = sendToArduino(finalPixals, TOTAL_NUMBER_OF_BYTES_TO_SEND);
 
    delete[] finalPixals;
+   return retVal;
 }
 
-inline void clearLeds()
+inline BOOL clearLeds()
 {
-   setSolidColor(0, 0, 0);
+   return setSolidColor(0, 0, 0);
 }
 
 void setDefaultScreenEdges()
@@ -454,7 +479,8 @@ void captureLoop()
    {
       // error handling
       printf("Error!!! GetDIBits (initial) failed\n");
-      stopCapturing = TRUE;
+      clearLeds();
+      gExitProgram = TRUE;
    }
 
    MyBMInfo.bmiHeader.biBitCount = 32;
@@ -465,12 +491,20 @@ void captureLoop()
    BYTE* lpPixels = new BYTE[MyBMInfo.bmiHeader.biSizeImage];
    BYTE* finalPixals = new BYTE[TOTAL_NUMBER_OF_BYTES_TO_SEND];
 
-   while (!stopCapturing)
+   while (!gExitProgram)
    {
+      if (!gIsSerialConnected)
+      {
+         Sleep(100);
+         continue;
+      }
+
       if ((gCurEdges.top >= height) || (gCurEdges.bottom >= height) || (gCurEdges.top >= gCurEdges.bottom))
       {
          printf("Error!!! wrong edges...\n");
-         stopCapturing = TRUE;
+
+         clearLeds();
+         gExitProgram = TRUE;
          break;
       }
 
@@ -479,7 +513,9 @@ void captureLoop()
       if (!bRet)
       {
          printf("Error!!! StretchBlt failed\n");
-         stopCapturing = TRUE;
+
+         clearLeds();
+         gExitProgram = TRUE;
          break;
       }
 
@@ -497,7 +533,9 @@ void captureLoop()
       {
          // error handling
          printf("Error!!! GetDIBits failed\n");
-         stopCapturing = TRUE;
+
+         clearLeds();
+         gExitProgram = TRUE;
          break;
       }
 
@@ -508,8 +546,7 @@ void captureLoop()
       {
          printf("Error!!! sendToArduino failed\n");
          printf("Sending data to serial port failed!\n");
-         stopCapturing = TRUE;
-         break;
+         continue;
       }
 
       Sleep(1); // Sleep 1mSec just to yield the thread
@@ -527,15 +564,41 @@ void captureLoop()
    clearLeds();
 }
 
+BOOL runInitialLedTest()
+{
+   BOOL retVal;
+   retVal = setSolidColor(255, 0, 0);
+   if (retVal == FALSE) return FALSE;
+   Sleep(500);
+   retVal = setSolidColor(0, 255, 0);
+   if (retVal == FALSE) return FALSE;
+   Sleep(500);
+   retVal = setSolidColor(0, 0, 255);
+   if (retVal == FALSE) return FALSE;
+   Sleep(500);
+   retVal = clearLeds();
+   if (retVal == FALSE) return FALSE;
+
+   return TRUE;
+}
+
+BOOL CtrlHandler(DWORD fdwCtrlType)
+{
+   gExitProgram = TRUE;
+   return TRUE;
+}
+
+///////////////////////////////////////////////////////////////////////////////////
+// Thread routines
+///////////////////////////////////////////////////////////////////////////////////
+
 DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
 {
-   const int SEC = 1000; // 1 second
-
    printf("Screen edge detection thread started - detection interval is %d [Sec]\n", gConfig.edgeDetection.checkIntervalSec);
 
-   for (;;)
+   while (!gExitProgram)
    {
-      if (!stopCapturing)
+      if (gIsSerialConnected)
       {
          if (gConfig.edgeDetection.enable)
          {
@@ -547,30 +610,10 @@ DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
          }
       }
 
-      Sleep(gConfig.edgeDetection.checkIntervalSec * SEC);
+      Sleep(gConfig.edgeDetection.checkIntervalSec * MSEC_TO_SEC);
    }
 
    return 0;
-}
-
-void StartDetectScreenEdgesThread()
-{
-   DWORD dwThreadId;
-   HANDLE hThread = CreateThread(
-      NULL,                      // default security attributes
-      0,                         // use default stack size
-      detectScreenEdgesThread,   // thread function
-      NULL,                      // argument to thread function
-      0,                         // use default creation flags
-      &dwThreadId);              // returns the thread identifier
-
-   if (hThread == NULL)
-      printf("Detect screen edges thread failed, error: %d\n", GetLastError());
-   else
-      printf("Detect screen edges thread started... (ID %d)\n", dwThreadId);
-
-   if (CloseHandle(hThread) != 0)
-      printf("Handle to thread closed successfully.\n");
 }
 
 DWORD WINAPI captureThread(LPVOID lpParam)
@@ -579,31 +622,55 @@ DWORD WINAPI captureThread(LPVOID lpParam)
    return 0;
 }
 
-void StartCaptureThread()
+DWORD WINAPI serialConnectionThread(LPVOID lpParam)
+{
+   BOOL serialSetupPassed;
+   BOOL testResult;
+
+   while (!gExitProgram)
+   {
+      if (!gIsSerialConnected)
+      {  
+         serialSetupPassed = setupSerialComm();
+         if (serialSetupPassed)
+         {
+            testResult = runInitialLedTest();
+            if (testResult == TRUE)
+            {
+               gIsSerialConnected = TRUE;
+            }
+         }
+      }
+
+      Sleep(500);
+   }
+   
+   return 0;
+}
+
+void startThread(LPTHREAD_START_ROUTINE threadRoutine)
 {
    DWORD dwThreadId;
    HANDLE hThread = CreateThread(
       NULL,                      // default security attributes
       0,                         // use default stack size
-      captureThread,             // thread function
+      threadRoutine,             // thread function
       NULL,                      // argument to thread function
       0,                         // use default creation flags
       &dwThreadId);              // returns the thread identifier
 
    if (hThread == NULL)
-      printf("Capture screen thread failed, error: %d\n", GetLastError());
+      printf("Thread failed, error: %d\n", GetLastError());
    else
-      printf("Capture screen thread started... (ID %d)\n", dwThreadId);
+      printf("Thread started... (ID %d)\n", dwThreadId);
 
    if (CloseHandle(hThread) != 0)
       printf("Handle to thread closed successfully.\n");
 }
 
-BOOL CtrlHandler(DWORD fdwCtrlType)
-{
-   stopCapturing = TRUE;
-   return TRUE;
-}
+///////////////////////////////////////////////////////////////////////////////////
+// Entry-point
+///////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char* argv[])
 {
@@ -614,32 +681,23 @@ int main(int argc, char* argv[])
    }
    
    initConfig();
-
    setDefaultScreenEdges();
-   
-   if (!setupSerialComm())
-   {
-      printf("Error connecting to COM port\n");
-      CloseHandle(gConfig.hSerial);
-      return -1;
-   }
-   
-   // Just to verify all leds are working
-   setSolidColor(255, 0, 0);
-   Sleep(5000);
-   clearLeds();
+
+   printf("Starting serial connection thread\n");
+   startThread(serialConnectionThread);
 
    printf("starting the edge detection thread\n");
-   StartDetectScreenEdgesThread();
-   
-   printf("starting the capturing loop thread\n");
-   StartCaptureThread();
+   startThread(detectScreenEdgesThread);
 
+   printf("starting the capturing loop thread\n");
+   startThread(captureThread);
+   
    // Program termination
+   printf("Press any key to terminate...\n");
    getchar();
-   stopCapturing = TRUE;
+   gExitProgram = TRUE;
    printf("Terminating execution\n");
-   Sleep(1000); //Sleep 1Sec to give the threads time to terminate
+   Sleep((gConfig.edgeDetection.checkIntervalSec + 1) * MSEC_TO_SEC); //Give time for threads to terminate, edge detection needs the most time. 
 
    // Close serial port
    printf("Closing serial port...");
@@ -653,3 +711,5 @@ int main(int argc, char* argv[])
 
    return 0;
 }
+
+
