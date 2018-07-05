@@ -30,6 +30,12 @@ typedef struct {
    unsigned int bottom;
 }screenEdges_t;
 
+typedef struct {
+   unsigned int width;
+   unsigned int height;
+}screenRes_t;
+
+
 struct {
    float brightnessCoef;
 
@@ -60,19 +66,58 @@ BOOL gExitProgram = FALSE;
 screenEdges_t gCurEdges = {MAXINT32, MAXINT32};
 screenEdges_t gSuggestedEdges = {MAXINT32, MAXINT32};
 
+// Screen resolution
+screenRes_t gScreenRes = { MAXINT32, MAXINT32 };
+
+void updateScreenResolution()
+{
+   unsigned int width = GetSystemMetrics(SM_CXSCREEN);
+   unsigned int height = GetSystemMetrics(SM_CYSCREEN);
+
+   if ((width != gScreenRes.width) || (height != gScreenRes.height))
+   {
+      gScreenRes.width = width;
+      gScreenRes.height = height;
+
+      printf("Screen resolution detected: %dx%d\n", width, height);
+   }
+}
+
+inline void setDefaultScreenEdges()
+{
+   gCurEdges.top = 0;
+   gCurEdges.bottom = gScreenRes.height - 1;
+}
+
 void initConfig()
 {
    gConfig.brightnessCoef = 1.0;
 
-   gConfig.edgeDetection.enable                = TRUE;
-   gConfig.edgeDetection.checkIntervalSec      = 5;
-   gConfig.edgeDetection.sensitivity           = 0.01;
-   gConfig.edgeDetection.stabilityEnable       = TRUE;
-   
+   gConfig.edgeDetection.enable = TRUE;
+   gConfig.edgeDetection.checkIntervalSec = 5;
+   gConfig.edgeDetection.sensitivity = 0.01;
+   gConfig.edgeDetection.stabilityEnable = TRUE;
+
    gConfig.leds.numHorisontal = 28;
-   gConfig.leds.numVertical   = 16;
+   gConfig.leds.numVertical = 16;
 
    gConfig.hSerial = INVALID_HANDLE_VALUE;
+}
+
+BOOL initGlobals()
+{
+   // Notify OS that this application is aware of screen scaling and will handle it independently (ignore it).
+   // This is needed to get the actual screen resolution, instead of the scaled one.
+   if (SetProcessDPIAware() == 0)
+   {
+      return FALSE;
+   }
+
+   updateScreenResolution();
+   setDefaultScreenEdges();
+   initConfig();
+
+   return TRUE;
 }
 
 BOOL setupSerialComm()
@@ -218,19 +263,10 @@ inline BOOL clearLeds()
    return setSolidColor(0, 0, 0);
 }
 
-void setDefaultScreenEdges()
-{
-   gCurEdges.top = 0;
-   gCurEdges.bottom = GetSystemMetrics(SM_CYSCREEN) - 1;
-}
-
 void detectScreenEdges()
 {
-   int width = GetSystemMetrics(SM_CXSCREEN);
-   int height = GetSystemMetrics(SM_CYSCREEN);
-
-   int newTopEdge = gCurEdges.top;
-   int newBottomEdge = gCurEdges.bottom;
+   unsigned int newTopEdge = gCurEdges.top;
+   unsigned int newBottomEdge = gCurEdges.bottom;
 
    if ((gCurEdges.top == MAXINT32) || (gCurEdges.bottom == MAXINT32))
    {
@@ -241,7 +277,7 @@ void detectScreenEdges()
    // copy screen to bitmap
    HDC     hScreen = GetDC(NULL);
    HDC     hDC = CreateCompatibleDC(hScreen);
-   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, width, height);
+   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, gScreenRes.width, gScreenRes.height);
 
    SelectObject(hDC, hBitmap);
 
@@ -260,7 +296,7 @@ void detectScreenEdges()
    MyBMInfo.bmiHeader.biCompression = BI_RGB;  // no compression -> easier to use
    MyBMInfo.bmiHeader.biHeight = abs(MyBMInfo.bmiHeader.biHeight); // correct the bottom-up ordering of lines
 
-   BOOL bRet = BitBlt(hDC, 0, 0, width, height, hScreen, 0, 0, SRCCOPY);
+   BOOL bRet = BitBlt(hDC, 0, 0, gScreenRes.width, gScreenRes.height, hScreen, 0, 0, SRCCOPY);
    if (!bRet)
    {
       printf("Error!!!\n");
@@ -277,18 +313,18 @@ void detectScreenEdges()
       return;
    }
 
-   int x, y, inv_y, x_add, valCount, sum;
+   unsigned int x, y, inv_y, x_add, valCount, sum;
    double precession;
    
    //Find top edge
-   for (y = 0; y < height; y++)
+   for (y = 0; y < gScreenRes.height; y++)
    {
       sum = 0;
       valCount = 0;
-      inv_y = height - 1 - y;
-      x_add = inv_y * width * NUM_VALUES_PER_WIN_PIXEL;
+      inv_y = gScreenRes.height - 1 - y;
+      x_add = inv_y * gScreenRes.width * NUM_VALUES_PER_WIN_PIXEL;
       
-      for (x = 0; x < (width * NUM_VALUES_PER_WIN_PIXEL); x++)
+      for (x = 0; x < (gScreenRes.width * NUM_VALUES_PER_WIN_PIXEL); x++)
       {
          if (x % NUM_VALUES_PER_WIN_PIXEL == NUM_VALUES_PER_STRIP_PIXEL)
             continue; //Don't count the alpha channel
@@ -308,12 +344,12 @@ void detectScreenEdges()
    }
 
    //Find bottom edge
-   for (y = 0; y < height; y++)
+   for (y = 0; y < gScreenRes.height; y++)
    {
       sum = 0;
-      x_add = y * width * NUM_VALUES_PER_WIN_PIXEL;
+      x_add = y * gScreenRes.width * NUM_VALUES_PER_WIN_PIXEL;
 
-      for (x = 0; x < (width * NUM_VALUES_PER_WIN_PIXEL); x++)
+      for (x = 0; x < (gScreenRes.width * NUM_VALUES_PER_WIN_PIXEL); x++)
       {
          if (x % NUM_VALUES_PER_WIN_PIXEL == NUM_VALUES_PER_STRIP_PIXEL)
             continue; //Don't count the alpha channel
@@ -323,7 +359,7 @@ void detectScreenEdges()
       precession = (double)sum / valCount / MAXBYTE;
       if (precession > gConfig.edgeDetection.sensitivity)
       {
-         newBottomEdge = height - y - 1;
+         newBottomEdge = gScreenRes.height - y - 1;
          //if (gCurEdges.bottom != newBottomEdge) printf("Detected new bottom edge - %d, precession - %f\n", newBottomEdge, precession);
 
          break;
@@ -336,7 +372,7 @@ void detectScreenEdges()
    DeleteDC(hDC);
    ReleaseDC(NULL, hScreen);
 
-   if ((newTopEdge >= height) || (newBottomEdge > height) || (newTopEdge >= newBottomEdge))
+   if ((newTopEdge >= gScreenRes.height) || (newBottomEdge > gScreenRes.height) || (newTopEdge >= newBottomEdge))
    {
       printf("Error!!! screen edges value is illegal, discarding values\n");
       return;
@@ -458,11 +494,6 @@ void prepareLedColors(BYTE *finalPixals, const BYTE* lpPixels, const BITMAPINFO 
 
 void captureLoop()
 {
-   unsigned int width = GetSystemMetrics(SM_CXSCREEN);
-   unsigned int height = GetSystemMetrics(SM_CYSCREEN);
-
-   printf("screen is %dx%d\n", width, height);
-
    // copy screen to bitmap
    HDC     hScreen = GetDC(NULL);
    HDC     hDC = CreateCompatibleDC(hScreen);
@@ -499,7 +530,7 @@ void captureLoop()
          continue;
       }
 
-      if ((gCurEdges.top >= height) || (gCurEdges.bottom >= height) || (gCurEdges.top >= gCurEdges.bottom))
+      if ((gCurEdges.top >= gScreenRes.height) || (gCurEdges.bottom >= gScreenRes.height) || (gCurEdges.top >= gCurEdges.bottom))
       {
          printf("Error!!! wrong edges...\n");
 
@@ -509,7 +540,7 @@ void captureLoop()
       }
 
       SetStretchBltMode(hDC, HALFTONE);
-      BOOL bRet = StretchBlt(hDC, 0, 0, MyBMInfo.bmiHeader.biWidth, MyBMInfo.bmiHeader.biHeight, hScreen, 0, gCurEdges.top, width, (gCurEdges.bottom - gCurEdges.top + 1), SRCCOPY);
+      BOOL bRet = StretchBlt(hDC, 0, 0, MyBMInfo.bmiHeader.biWidth, MyBMInfo.bmiHeader.biHeight, hScreen, 0, gCurEdges.top, gScreenRes.width, (gCurEdges.bottom - gCurEdges.top + 1), SRCCOPY);
       if (!bRet)
       {
          printf("Error!!! StretchBlt failed\n");
@@ -600,6 +631,8 @@ DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
    {
       if (gIsSerialConnected)
       {
+         updateScreenResolution();
+
          if (gConfig.edgeDetection.enable)
          {
             detectScreenEdges();
@@ -679,9 +712,13 @@ int main(int argc, char* argv[])
       printf("ERROR: could not set control handler.\n");
       return -1;
    }
-   
-   initConfig();
-   setDefaultScreenEdges();
+
+   // Some initializations
+   if( initGlobals() == 0)
+   {
+      printf("Error\n");
+      return -1;
+   }
 
    printf("Starting serial connection thread\n");
    startThread(serialConnectionThread);
