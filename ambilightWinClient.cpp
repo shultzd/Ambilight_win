@@ -12,8 +12,8 @@
 
 #define SERIAL_COM_PORT L"\\\\.\\COM1"
 
-#define MSEC_TO_SEC (1000) // 1 mSec = 1000 uSec
-#define USEC_TO_MSEC (1000) // 1 mSec = 1000 uSec
+#define SEC_TO_MSEC (1000) // 1 Sec = 1000 mSec
+#define MSEC_TO_USEC (1000) // 1 mSec = 1000 uSec
 
 #define NUM_VALUES_PER_WIN_PIXEL   (4)
 #define NUM_VALUES_PER_STRIP_PIXEL (3)
@@ -235,7 +235,7 @@ BOOL sendToArduino(BYTE *finalPixels, int numPixels)
 
       auto end_time = std::chrono::high_resolution_clock::now();
       auto time = end_time - start_time;
-      if ((std::chrono::duration_cast<std::chrono::microseconds>(time).count()) > (0.5 * USEC_TO_MSEC * MSEC_TO_SEC))
+      if ((std::chrono::duration_cast<std::chrono::microseconds>(time).count()) > (0.5 * MSEC_TO_USEC * SEC_TO_MSEC))
       {
          //printf("Error!!! sendToArduino: ACK timeout\n");
          CloseHandle(gConfig.hSerial);
@@ -738,7 +738,7 @@ DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
          }
       }
 
-      Sleep(gConfig.edgeDetection.checkIntervalSec * MSEC_TO_SEC);
+      Sleep(gConfig.edgeDetection.checkIntervalSec * SEC_TO_MSEC);
    }
 
    return 0;
@@ -752,22 +752,36 @@ DWORD WINAPI captureThread(LPVOID lpParam)
 
 DWORD WINAPI serialConnectionThread(LPVOID lpParam)
 {
-   BOOL serialSetupPassed;
-   BOOL testResult;
+   BOOL allowFastReconnect = FALSE;
 
    while (!gExitProgram)
    {
       if (!gIsSerialConnected)
       {
-         serialSetupPassed = setupSerialComm();
+         BOOL serialSetupPassed = setupSerialComm();
          if (serialSetupPassed)
          {
-            testResult = runInitialLedTest();
-            if (testResult == TRUE)
+            if (allowFastReconnect)
             {
+               // DO fast reconnect, without running the connection test
+               // this helps for momentarily USB disconnects.
                gIsSerialConnected = TRUE;
             }
+            else
+            {
+               BOOL testResult = runInitialLedTest();
+               if (testResult == TRUE)
+               {
+                  gIsSerialConnected = TRUE;
+               }
+            }
          }
+
+         allowFastReconnect = FALSE;
+      }
+      else
+      {
+         allowFastReconnect = TRUE;
       }
 
       Sleep(500);
@@ -793,7 +807,9 @@ void startThread(LPTHREAD_START_ROUTINE threadRoutine)
       printf("Thread started... (ID %d)\n", dwThreadId);
 
    if (CloseHandle(hThread) != 0)
-      printf("Handle to thread closed successfully.\n");
+   {
+      //printf("Handle to thread closed successfully.\n");
+   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////
@@ -829,7 +845,7 @@ int main(int argc, char* argv[])
    getchar();
    gExitProgram = TRUE;
    printf("Terminating execution\n");
-   Sleep((gConfig.edgeDetection.checkIntervalSec + 1) * MSEC_TO_SEC); //Give time for threads to terminate, edge detection needs the most time. 
+   Sleep((gConfig.edgeDetection.checkIntervalSec + 1) * SEC_TO_MSEC); //Give time for threads to terminate, edge detection needs the most time. 
 
    // Close serial port
    printf("Closing serial port...");
