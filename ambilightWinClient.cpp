@@ -54,26 +54,21 @@ class leds {
 private:
    serialCon serialConnection;
    float brightnessCoef;
-
+   BOOL isReady;
+   
 public:
    //LEDs layout
-   const unsigned int numHorisontal = 28;
-   const unsigned int numVertical = 16;
-
-   //LS2802b parameters
-   const unsigned int numValuesPerPixel = 3;
-   
-   const unsigned int totalAmountOfLeds = ((numHorisontal + numVertical) * 2); // Amount of LEDs on all 4 sides
-   const unsigned int totalNumBytesToSend = totalAmountOfLeds * numValuesPerPixel;
+   static const unsigned int numHorisontal = 28;
+   static const unsigned int numVertical = 16;
+   static const unsigned int numValuesPerPixel = 3; //LS2802b parameters
+   static const unsigned int totalAmountOfLeds = ((numHorisontal + numVertical) * 2); // Amount of LEDs on all 4 sides
+   static const unsigned int totalNumBytesToSend = totalAmountOfLeds * numValuesPerPixel;
 
    leds() {
       brightnessCoef = 1.0;
+      isReady = FALSE;
 
-      serialConnection.setupSerialComm();
-      if (isConnected())
-      {
-         runLedTest();
-      }
+      tryConnect(TRUE);
    }
 
    ~leds() {
@@ -81,17 +76,28 @@ public:
    }
 
    float getBrightnessCoef() { return brightnessCoef; }
-   BOOL isConnected() { return serialConnection.isConnected(); }
+   BOOL isConnected() { return serialConnection.isConnected() && isReady; }
    void setSolidColor(const BYTE red, const BYTE green, const BYTE blue);
    void clearLeds() { setSolidColor(0, 0, 0); }
    void runLedTest();
-   void setLeds(BYTE *finalPixels, int numPixels){ serialConnection.sendToArduino(finalPixels, numPixels); }
+   void setLeds(BYTE *finalPixels, int numPixels){ if (isReady) { serialConnection.sendToArduino(finalPixels, numPixels); } }
    
-   void tryConnect() 
+   void tryConnect(BOOL runTest) 
    {
-      if (!isConnected()) 
+      if (!serialConnection.isConnected())
       {
-         serialConnection.setupSerialComm();
+         BOOL res;
+         isReady = FALSE;
+
+         res = serialConnection.setupSerialComm();
+         if (res)
+         {
+            if (runTest)
+            {
+               runLedTest();
+            }
+            isReady = TRUE;
+         }
       }
    }
 };
@@ -369,7 +375,7 @@ void screen::detectEdges()
 
       for (x = 0; x < (res.width * NUM_VALUES_PER_WIN_PIXEL); x++)
       {
-         if (x % NUM_VALUES_PER_WIN_PIXEL == gLeds.numValuesPerPixel)
+         if (x % NUM_VALUES_PER_WIN_PIXEL == leds::numValuesPerPixel)
             continue; //Don't count the alpha channel
 
          sum += lpPixels[x + x_add];
@@ -394,7 +400,7 @@ void screen::detectEdges()
 
       for (x = 0; x < (res.width * NUM_VALUES_PER_WIN_PIXEL); x++)
       {
-         if (x % NUM_VALUES_PER_WIN_PIXEL == gLeds.numValuesPerPixel)
+         if (x % NUM_VALUES_PER_WIN_PIXEL == leds::numValuesPerPixel)
             continue; //Don't count the alpha channel
          sum += lpPixels[x + x_add];
       }
@@ -417,7 +423,7 @@ void screen::detectEdges()
       valCount = 0;
 
       //no need to count the Alpha channel
-      for (pixel_x = 0; pixel_x < gLeds.numValuesPerPixel; pixel_x++)
+      for (pixel_x = 0; pixel_x < leds::numValuesPerPixel; pixel_x++)
       {
          unsigned int final_pixel_x = (x * NUM_VALUES_PER_WIN_PIXEL) + pixel_x;
          for (y = 0; y < res.height; y++)
@@ -448,7 +454,7 @@ void screen::detectEdges()
       valCount = 0;
 
       //no need to count the Alpha channel
-      for (pixel_x = 0; pixel_x < gLeds.numValuesPerPixel; pixel_x++)
+      for (pixel_x = 0; pixel_x < leds::numValuesPerPixel; pixel_x++)
       {
          unsigned int final_pixel_x = (inv_x * NUM_VALUES_PER_WIN_PIXEL) + pixel_x;
          for (y = 0; y < res.height; y++)
@@ -541,73 +547,73 @@ void prepareLedColors(BYTE *finalPixals, const BYTE* lpPixels, const BITMAPINFO 
    //Bottom side
    x = 0; y = 0;
    x_add = y * stride;
-   for (x = 0; x < (int)gLeds.numHorisontal; x++)
+   for (x = 0; x < (int)leds::numHorisontal; x++)
    {
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
 
       // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
-      if ((x == 0) || (x == gLeds.numHorisontal - 1))
+      if ((x == 0) || (x == leds::numHorisontal - 1))
          brightnessNormalizationCoef = 0.5;
       else
          brightnessNormalizationCoef = 1;
 
       translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
-      finalPixel += gLeds.numValuesPerPixel;
+      finalPixel += leds::numValuesPerPixel;
    }
 
    //Right side
-   x = gLeds.numHorisontal - 1;
-   for (y = 0; y < (int)gLeds.numVertical; y++)
+   x = leds::numHorisontal - 1;
+   for (y = 0; y < (int)leds::numVertical; y++)
    {
       x_add = y * stride;
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
 
       // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
-      if ((y == 0) || (y == (gLeds.numVertical - 1)))
+      if ((y == 0) || (y == (leds::numVertical - 1)))
          brightnessNormalizationCoef = 0.5;
       else
          brightnessNormalizationCoef = 1;
 
       translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
-      finalPixel += gLeds.numValuesPerPixel;
+      finalPixel += leds::numValuesPerPixel;
    }
 
    //Top side
-   y = gLeds.numVertical - 1;
+   y = leds::numVertical - 1;
    x_add = y * stride;
-   for (x = gLeds.numHorisontal - 1; x >= 0; x--)
+   for (x = leds::numHorisontal - 1; x >= 0; x--)
    {
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
 
       // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
-      if ((x == 0) || (x == gLeds.numHorisontal - 1))
+      if ((x == 0) || (x == leds::numHorisontal - 1))
          brightnessNormalizationCoef = 0.5;
       else
          brightnessNormalizationCoef = 1;
 
       translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
-      finalPixel += gLeds.numValuesPerPixel;
+      finalPixel += leds::numValuesPerPixel;
    }
 
    //Left side
    x = 0;
-   for (y = gLeds.numVertical - 1; y >= 0; y--)
+   for (y = leds::numVertical - 1; y >= 0; y--)
    {
       x_add = y * stride;
       pixel = (x + x_add) * NUM_VALUES_PER_WIN_PIXEL;
 
       // Corner screen areas will light 2 leds, so I'm reducing brightness by 50% to compensate
-      if ((y == 0) || (y == (gLeds.numVertical - 1)))
+      if ((y == 0) || (y == (leds::numVertical - 1)))
          brightnessNormalizationCoef = 0.5;
       else
          brightnessNormalizationCoef = 1;
 
       translateWin2LedPixel(&lpPixels[pixel], &finalPixals[finalPixel], brightnessNormalizationCoef);
 
-      finalPixel += gLeds.numValuesPerPixel;
+      finalPixel += leds::numValuesPerPixel;
    }
 }
 
@@ -616,7 +622,7 @@ void captureLoop()
    // copy screen to bitmap
    HDC     hScreen = GetDC(NULL);
    HDC     hDC = CreateCompatibleDC(hScreen);
-   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, gLeds.numHorisontal, gLeds.numVertical);
+   HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, leds::numHorisontal, leds::numVertical);
 
    SelectObject(hDC, hBitmap);
 
@@ -639,7 +645,7 @@ void captureLoop()
 
    // create the pixel buffer
    BYTE* lpPixels = new BYTE[MyBMInfo.bmiHeader.biSizeImage];
-   BYTE* finalPixals = new BYTE[gLeds.totalNumBytesToSend];
+   BYTE* finalPixals = new BYTE[leds::totalNumBytesToSend];
 
    while (!gExitProgram)
    {
@@ -693,7 +699,7 @@ void captureLoop()
       // prepare all LED colors
       prepareLedColors(finalPixals, lpPixels, &MyBMInfo);
 
-      gLeds.setLeds(finalPixals, gLeds.totalNumBytesToSend);
+      gLeds.setLeds(finalPixals, leds::totalNumBytesToSend);
       
       Sleep(1); // Sleep 1mSec just to yield the thread
    }
@@ -771,14 +777,7 @@ DWORD WINAPI serialConnectionThread(LPVOID lpParam)
    {
       if (!gLeds.isConnected())
       {
-         gLeds.tryConnect();
-         if (gLeds.isConnected())
-         {
-            if (!allowFastReconnect)
-            {
-               gLeds.runLedTest();
-            }
-         }
+         gLeds.tryConnect(!allowFastReconnect);
 
          allowFastReconnect = FALSE;
       }
