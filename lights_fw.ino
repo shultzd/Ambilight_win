@@ -31,10 +31,10 @@ void setup() {
   strip.begin();
   strip.show(); // Initialize all pixels to 'off'
 
-  danny_test();
+  work_loop();
 }
 
-void danny_test()
+void work_loop()
 {
   uint32_t c;
 
