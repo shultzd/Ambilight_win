@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <chrono> //For time measurements
 
+//#define SAVE_BITMAP_TO_CLIPBOARD
+
 ///////////////////////////////////////////////////////////////////////////////////
 // Defines
 ///////////////////////////////////////////////////////////////////////////////////
@@ -14,6 +16,15 @@
 #define MSEC_TO_USEC (1000) // 1 mSec = 1000 uSec
 
 #define NUM_VALUES_PER_WIN_PIXEL   (4)
+
+///////////////////////////////////////////////////////////////////////////////////
+// Globals
+///////////////////////////////////////////////////////////////////////////////////
+
+// Flow control 
+BOOL gExitProgram = FALSE;
+const unsigned int gEdgeDetectionCheckIntervalSec = 5;
+const BOOL edgeDetection_enable = TRUE;
 
 ///////////////////////////////////////////////////////////////////////////////////
 // Classes
@@ -113,10 +124,10 @@ public:
       // This is needed to get the actual screen resolution, instead of the scaled one.
       SetProcessDPIAware();
 
-      width = GetSystemMetrics(SM_CXSCREEN);
-      height = GetSystemMetrics(SM_CYSCREEN);
+      width = 0;
+      height = 0;
 
-      printf("Screen resolution detected: %dx%d\n", width, height);
+      update();
    }
 
    void update()
@@ -178,15 +189,6 @@ public:
 
 leds gLeds;
 screen gScreen;
-
-///////////////////////////////////////////////////////////////////////////////////
-// Globals
-///////////////////////////////////////////////////////////////////////////////////
-
-// Flow control 
-BOOL gExitProgram = FALSE;
-const unsigned int gEdgeDetectionCheckIntervalSec = 5;
-const BOOL edgeDetection_enable = TRUE;
 
 BOOL serialCon::setupSerialComm()
 {
@@ -651,8 +653,8 @@ void captureLoop()
    {
       if (!gLeds.isConnected())
       {
-         Sleep(100);
-         continue;
+         //Exit to outer loop and wait there for leds to reconnect
+         break;
       }
 
       if ((gScreen.curEdges.top >= gScreen.res.height) || (gScreen.curEdges.bottom >= gScreen.res.height) || (gScreen.curEdges.top >= gScreen.curEdges.bottom)
@@ -664,7 +666,7 @@ void captureLoop()
          gExitProgram = TRUE;
          break;
       }
-
+      
       SetStretchBltMode(hDC, HALFTONE);
       BOOL bRet = StretchBlt(hDC, 0, 0, MyBMInfo.bmiHeader.biWidth, MyBMInfo.bmiHeader.biHeight, hScreen, gScreen.curEdges.left, gScreen.curEdges.top, (gScreen.curEdges.right - gScreen.curEdges.left + 1), (gScreen.curEdges.bottom - gScreen.curEdges.top + 1), SRCCOPY);
       if (!bRet)
@@ -676,13 +678,13 @@ void captureLoop()
          break;
       }
 
-      /*
+#ifdef SAVE_BITMAP_TO_CLIPBOARD
       // save bitmap to clipboard
       OpenClipboard(NULL);
       EmptyClipboard();
       SetClipboardData(CF_BITMAP, hBitmap);
       CloseClipboard();
-      */
+#endif // SAVE_BITMAP_TO_CLIPBOARD
 
       // Call GetDIBits a second time, this time to (format and) store the actual
       // bitmap data (the "pixels") in the buffer lpPixels
@@ -719,13 +721,13 @@ void captureLoop()
 void leds::runLedTest()
 {
    setSolidColor(255, 0, 0);
-   Sleep(1000);
+   Sleep(250);
    setSolidColor(0, 255, 0);
-   Sleep(1000);
+   Sleep(250);
    setSolidColor(0, 0, 255);
-   Sleep(1000);
+   Sleep(250);
    clearLeds();
-   Sleep(1000);
+   Sleep(250);
 }
 
 BOOL CtrlHandler(DWORD fdwCtrlType)
@@ -765,7 +767,18 @@ DWORD WINAPI detectScreenEdgesThread(LPVOID lpParam)
 
 DWORD WINAPI captureThread(LPVOID lpParam)
 {
-   captureLoop();
+   printf("main capture thread started\n");
+
+   while (!gExitProgram)
+   {
+      Sleep(100);
+
+      if (gLeds.isConnected())
+      {
+         captureLoop();
+      }
+   }
+
    return 0;
 }
 
